@@ -1,0 +1,14 @@
+---
+# Image pins. Written by the update flow on approval. `track` is the registry tag
+# whose digest is followed; `digest` is what actually runs.
+# motioneye: 0.44.0 (2026-10-12)
+# cloudflared: version unknown (2026-10-12)
+images:
+  motioneye:
+    repository: ghcr.io/motioneye-project/motioneye
+    track: latest
+    digest: sha256:7da31d62e6c46ee8b61280f872801e429ec6f3db81bb23aca11c83863939cade
+  cloudflared:
+    repository: docker.io/cloudflare/cloudflared
+    track: latest
+    digest: sha256:9b49eed8f62806d5d45ddf59ecefb5710429598ea6d3fcccd2af938f621b2b07

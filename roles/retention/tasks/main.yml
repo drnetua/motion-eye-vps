@@ -1,0 +1,54 @@
+---
+- name: Install prune script
+  ansible.builtin.copy:
+    src: nvr-prune
+    dest: /usr/local/sbin/nvr-prune
+    mode: "0755"
+
+- name: Prune configuration
+  ansible.builtin.template:
+    src: nvr-prune.conf.j2
+    dest: /etc/nvr-prune.conf
+    mode: "0644"
+
+- name: Prune service unit
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/nvr-prune.service
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Prune oldest NVR recordings above the storage threshold
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/nvr-prune
+      Nice=10
+      IOSchedulingClass=idle
+  notify: Reload systemd
+
+- name: Prune timer unit
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/nvr-prune.timer
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Hourly NVR recordings prune
+
+      [Timer]
+      OnBootSec=10min
+      OnUnitActiveSec=1h
+      RandomizedDelaySec=5min
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+  notify: Reload systemd
+
+- name: Flush handlers
+  ansible.builtin.meta: flush_handlers
+
+- name: Prune timer enabled
+  ansible.builtin.systemd_service:
+    name: nvr-prune.timer
+    enabled: true
+    state: started

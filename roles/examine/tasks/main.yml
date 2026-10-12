@@ -1,0 +1,131 @@
+---
+- name: Assert supported operating system
+  ansible.builtin.assert:
+    that:
+      - ansible_distribution == "Ubuntu"
+      - ansible_distribution_version == "24.04"
+    fail_msg: >-
+      Unsupported OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
+      ({{ ansible_distribution_release }}). This repo supports Ubuntu 24.04 LTS only.
+    quiet: true
+
+- name: Compute filesystem for recordings path (simple)
+  ansible.builtin.shell: |
+    set -e
+    for p in "{{ nvr_base_dir }}/media" "{{ nvr_base_dir }}" "$(dirname "{{ nvr_base_dir }}")" /; do
+      if [ -e "$p" ]; then df --output=target,size,avail,pcent "$p"; exit 0; fi
+    done
+  args:
+    executable: /bin/bash
+  register: _df
+  changed_when: false
+
+- name: Parse recordings filesystem
+  ansible.builtin.set_fact:
+    media_fs_mount: "{{ _df.stdout_lines[-1].split()[0] }}"
+    media_fs_size_gb: "{{ (_df.stdout_lines[-1].split()[1] | int / 1048576) | round(1) }}"
+    media_fs_avail_gb: "{{ (_df.stdout_lines[-1].split()[2] | int / 1048576) | round(1) }}"
+    media_fs_used_pct: "{{ _df.stdout_lines[-1].split()[3] | regex_replace('%', '') | int }}"
+
+- name: List listening TCP ports
+  ansible.builtin.command: ss -Hltn
+  register: _ss
+  changed_when: false
+
+- name: Parse listening ports
+  ansible.builtin.set_fact:
+    listening_ports: "{{ _ss.stdout_lines | map('split') | map(attribute=3) | list | unique | sort }}"
+
+- name: Check for Docker
+  ansible.builtin.command: docker compose version --short
+  register: _docker
+  changed_when: false
+  failed_when: false
+
+- name: Record Docker presence
+  ansible.builtin.set_fact:
+    docker_present: "{{ _docker.rc == 0 }}"
+    docker_compose_version: "{{ _docker.stdout | default('') if _docker.rc == 0 else '' }}"
+
+- name: Check for an existing deployment from this repo
+  ansible.builtin.stat:
+    path: "{{ nvr_base_dir }}/docker-compose.yml"
+  register: _compose
+
+- name: Record deployment presence
+  ansible.builtin.set_fact:
+    deployment_present: "{{ _compose.stat.exists and docker_present }}"
+
+- name: Update flow requires an existing deployment
+  ansible.builtin.assert:
+    that: deployment_present
+    fail_msg: "No deployment from this repo found at {{ nvr_base_dir }} on this server. Run the initial deployment first: make init"
+    quiet: true
+  when: require_existing_deployment | default(false) | bool
+
+- name: Inspect existing deployment
+  when: deployment_present
+  block:
+    - name: List deployment containers
+      ansible.builtin.command: docker compose -f {{ nvr_base_dir }}/docker-compose.yml ps --all --format json
+      register: _ps
+      changed_when: false
+      failed_when: false
+
+    - name: Parse container list
+      ansible.builtin.set_fact:
+        deployment_containers: >-
+          {{ (_ps.stdout | trim | length > 0)
+             | ternary(_ps.stdout_lines | map('from_json') | list, []) }}
+
+    - name: Read running image digests
+      ansible.builtin.command: >-
+        docker inspect --format '{{ "{{" }} slice .Name 1 {{ "}}" }} {{ "{{" }} .Config.Image {{ "}}" }}'
+        {{ deployment_containers | map(attribute='Name') | join(' ') }}
+      register: _inspect
+      changed_when: false
+      failed_when: false
+      when: deployment_containers | length > 0
+
+    - name: Record running digests
+      ansible.builtin.set_fact:
+        deployment_digests: "{{ _inspect.stdout_lines | default([]) }}"
+        deployment_unhealthy: >-
+          {{ deployment_containers
+             | rejectattr('State', 'equalto', 'running')
+             | map(attribute='Name') | list
+             + (deployment_containers
+                | selectattr('Health', 'defined')
+                | rejectattr('Health', 'in', ['healthy', ''])
+                | map(attribute='Name') | list) }}
+
+- name: Capacity warning
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: {{ cameras | length }} cameras on {{ ansible_processor_vcpus }} CPU core(s)
+      exceeds {{ cameras_per_core_warn }} per core; motion detection may exceed CPU capacity.
+      Prefer substream URLs and a low detect_framerate.
+  when: (cameras | length) > (ansible_processor_vcpus | int) * (cameras_per_core_warn | int)
+
+- name: RTSP pre-flight
+  ansible.builtin.include_tasks: rtsp.yml
+  when: rtsp_preflight == 'force' or (rtsp_preflight == 'auto' and docker_present)
+
+- name: RTSP pre-flight deferred
+  ansible.builtin.debug:
+    msg: "RTSP pre-flight deferred: Docker is not installed yet; cameras will be probed after hardening, before deployment."
+  when: rtsp_preflight == 'auto' and not docker_present
+
+- name: Server summary
+  ansible.builtin.debug:
+    msg:
+      - "OS:        {{ ansible_distribution }} {{ ansible_distribution_version }} ({{ ansible_kernel }})"
+      - "CPU:       {{ ansible_processor_vcpus }} core(s), {{ ansible_architecture }}"
+      - "Memory:    {{ (ansible_memtotal_mb / 1024) | round(1) }} GiB total, {{ (ansible_memory_mb.nocache.free / 1024) | round(1) }} GiB available"
+      - "Disk:      {{ media_fs_mount }} {{ media_fs_size_gb }} GiB, {{ media_fs_avail_gb }} GiB free ({{ media_fs_used_pct }}% used) for {{ nvr_base_dir }}/media"
+      - "Ports:     listening TCP {{ listening_ports | join(', ') }}"
+      - "Docker:    {{ docker_present | ternary('present, compose ' ~ docker_compose_version, 'absent') }}"
+      - "Deploy:    {{ deployment_present | ternary('existing deployment at ' ~ nvr_base_dir, 'uninitialized (no deployment from this repo)') }}"
+      - "Images:    {{ deployment_present | ternary(deployment_digests | default([]) | join(' | '), 'n/a') }}"
+      - "Health:    {{ deployment_present | ternary((deployment_unhealthy | default([]) | length == 0) | ternary('all containers running and healthy', 'NOT healthy: ' ~ (deployment_unhealthy | default([]) | join(', '))), 'n/a') }}"
+      - "Cameras:   {{ ((rtsp_results | default([]) | length) > 0) | ternary((rtsp_results | default([]) | map(attribute='line') | join(' | ')), 'not probed') }}"

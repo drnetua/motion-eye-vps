@@ -1,0 +1,109 @@
+{#- Rendered from inventory on every deploy (D-05). cam = camera entry, cam_id = 1-based index. -#}
+{%- set main = cam.main_url | urlsplit -%}
+{%- set detect = (cam.sub_url | default(cam.main_url)) | urlsplit -%}
+{%- macro bare(u) -%}
+{{ u.scheme }}://{{ u.hostname }}{% if u.port %}:{{ u.port }}{% endif %}{{ u.path }}{% if u.query %}?{{ u.query }}{% endif %}
+{%- endmacro -%}
+{%- set w = cam.detect_width | default(detect_width) | int -%}
+{%- set h = cam.detect_height | default(detect_height) | int -%}
+{%- set fps = cam.framerate | default(detect_framerate) | int -%}
+# @enabled on
+# @id {{ cam_id }}
+# @admin_only off
+# @storage_device custom-path
+# @network_server 
+# @network_share_name 
+# @network_smb_ver 1.0
+# @network_username 
+# @network_password 
+# @upload_enabled off
+# @upload_picture on
+# @upload_movie on
+# @upload_service ftp
+# @upload_server 
+# @upload_port 
+# @upload_method POST
+# @upload_location 
+# @upload_subfolders on
+# @upload_username 
+# @upload_password 
+# @upload_endpoint_url 
+# @upload_access_key 
+# @upload_secret_key 
+# @upload_bucket 
+# @upload_sse_c_key 
+# @clean_cloud_enabled off
+# @webcam_resolution 100
+# @webcam_server_resize off
+# @motion_detection on
+# @preserve_pictures 0
+# @manual_snapshots on
+# @preserve_movies {{ cam.retention_days | default(retention_days) }}
+# @manual_record off
+# @working_schedule 
+# @working_schedule_type outside
+# @lang en
+
+netcam_url {{ bare(detect) }}
+{% if cam.sub_url is defined %}
+netcam_high_url {{ bare(main) }}
+{% endif %}
+{% if main.username %}
+netcam_userpass {{ main.username }}:{{ main.password }}
+{% endif %}
+netcam_params keepalive = off,tolerant_check = on
+width {{ w }}
+height {{ h }}
+camera_name {{ cam.name }}
+auto_brightness off
+framerate {{ fps }}
+rotate 0
+mask_privacy 
+target_dir /var/lib/motioneye/{{ cam.name }}
+stream_localhost on
+stream_port {{ 9080 + cam_id }}
+stream_maxrate 5
+stream_quality 85
+stream_motion 0
+stream_auth_method 0
+text_left {{ cam.name }}
+text_right %Y-%m-%d\n%T
+text_scale 1
+text_changes off
+locate_motion_mode off
+locate_motion_style redbox
+threshold {{ ((cam.threshold_pct | default(motion_threshold_pct) | float) * w * h / 100) | int }}
+threshold_maximum 0
+threshold_tune off
+noise_tune on
+noise_level 33
+lightswitch_percent 0
+despeckle_filter 
+minimum_motion_frames {{ cam.minimum_motion_frames | default(2) }}
+smart_mask_speed 0
+mask_file 
+movie_output_motion off
+picture_output_motion off
+pre_capture {{ (motion_pre_capture | int) * fps }}
+post_capture {{ (motion_post_capture | int) * fps }}
+picture_output off
+picture_filename 
+emulate_motion off
+event_gap {{ event_gap_s }}
+snapshot_interval 0
+snapshot_filename 
+picture_quality 85
+movie_filename %Y-%m-%d/%H-%M-%S
+movie_max_time {{ movie_max_time_s }}
+movie_output on
+movie_passthrough on
+movie_codec mp4
+movie_quality 75
+on_event_start {{ motioneye_pkg_dir }}/scripts/relayevent.sh "/etc/motioneye/motioneye.conf" start %t
+on_event_end {{ motioneye_pkg_dir }}/scripts/relayevent.sh "/etc/motioneye/motioneye.conf" stop %t
+on_movie_end {{ motioneye_pkg_dir }}/scripts/relayevent.sh "/etc/motioneye/motioneye.conf" movie_end %t %f
+on_picture_save {{ motioneye_pkg_dir }}/scripts/relayevent.sh "/etc/motioneye/motioneye.conf" picture_save %t %f
+stream_authentication 
+{% for k, v in (cam.extra | default({})).items() %}
+{{ k }} {{ v }}
+{% endfor %}

@@ -1,0 +1,44 @@
+---
+- name: Connector readiness (cloudflared's own check)
+  ansible.builtin.command: docker exec cloudflared cloudflared tunnel --metrics 127.0.0.1:2000 ready
+  register: _ready
+  changed_when: false
+  failed_when: false
+  retries: 10
+  delay: 6
+  until: _ready.rc == 0
+
+- name: Assert connector is ready
+  ansible.builtin.assert:
+    that: _ready.rc == 0
+    fail_msg: "cloudflared reports the tunnel is not ready: {{ (_ready.stdout ~ ' ' ~ _ready.stderr) | trim | truncate(300) }}"
+    quiet: true
+
+- name: Public hostname answers through Cloudflare Access
+  ansible.builtin.uri:
+    url: "https://{{ nvr_hostname }}/"
+    follow_redirects: none
+    status_code: [200, 302, 403]
+    return_content: false
+  register: _https
+  delegate_to: localhost
+  become: false
+  failed_when: false
+
+- name: Assert the hostname is served and protected by Access
+  vars:
+    _loc: "{{ _https.get('location', '') }}"
+  ansible.builtin.assert:
+    that:
+      - _https.status == 302
+      - "'cloudflareaccess.com' in _loc"
+    fail_msg: >-
+      https://{{ nvr_hostname }}/ {{ (_https.status | default(-1) | int > 0) | ternary('returned HTTP ' ~ _https.status ~ ((_loc | length > 0) | ternary(' redirecting to ' ~ _loc, '')), 'did not answer: ' ~ (_https.msg | default('no response'))) }}.
+      Expected a 302 to the Cloudflare Access login. A 200 means the NVR is reachable WITHOUT a login wall;
+      HTTP 530 means the tunnel is not serving this hostname; a DNS error means the public hostname is not configured
+      (Zero Trust dashboard -> your tunnel -> Public Hostname, service http://motioneye:8765; then Access -> Applications; docs/INPUTS.md §4).
+    quiet: true
+
+- name: Tunnel summary
+  ansible.builtin.set_fact:
+    tunnel_summary: "connector ready; https://{{ nvr_hostname }}/ redirects to Cloudflare Access"

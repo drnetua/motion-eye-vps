@@ -1,0 +1,9 @@
+---
+# OS upgrade, automatic security updates, key-only SSH, firewall (22 only), fail2ban, Docker.
+- name: Harden server
+  hosts: nvr
+  gather_facts: true
+  force_handlers: true
+  roles:
+    - hardening
+    - docker

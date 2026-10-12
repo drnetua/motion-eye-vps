@@ -1,0 +1,5 @@
+---
+- name: Restart cloudflared
+  ansible.builtin.command: docker restart cloudflared
+  changed_when: true
+  failed_when: false   # not running yet on the first deploy; compose starts it

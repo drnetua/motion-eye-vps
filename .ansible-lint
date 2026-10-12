@@ -1,0 +1,10 @@
+---
+profile: moderate
+exclude_paths:
+  - .ansible/
+  - openspec/
+  - .idea/
+skip_list:
+  - var-naming[no-role-prefix]   # roles use short, documented prefixes (cf_, nvr_, _private)
+  - name[casing]
+  - yaml[line-length]

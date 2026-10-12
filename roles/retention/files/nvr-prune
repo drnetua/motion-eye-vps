@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# nvr-prune: keep the recordings filesystem at or below a usage threshold by
+# deleting the oldest recording media first. Managed by the ops repo
+# (roles/retention). Config: /etc/nvr-prune.conf (MEDIA_PATH, MAX_USAGE_PCT).
+set -euo pipefail
+
+CONF="${NVR_PRUNE_CONF:-/etc/nvr-prune.conf}"
+DRY_RUN=0
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run|-n) DRY_RUN=1 ;;
+    --config=*) CONF="${arg#--config=}" ;;
+    -h|--help) echo "usage: nvr-prune [--dry-run] [--config=FILE]"; exit 0 ;;
+    *) echo "unknown argument: $arg" >&2; exit 2 ;;
+  esac
+done
+
+# shellcheck disable=SC1090
+[ -r "$CONF" ] && . "$CONF"
+MEDIA_PATH="${MEDIA_PATH:?MEDIA_PATH must be set in $CONF}"
+MAX_USAGE_PCT="${MAX_USAGE_PCT:-90}"
+BATCH="${BATCH:-20}"
+
+case "$MEDIA_PATH" in /srv/*|/var/lib/*|/data/*|/mnt/*|/media/*) ;; *)
+  echo "refusing to prune outside an expected media root: $MEDIA_PATH" >&2; exit 2 ;;
+esac
+[ -d "$MEDIA_PATH" ] || { echo "media path does not exist: $MEDIA_PATH" >&2; exit 2; }
+
+usage_pct() { df --output=pcent "$MEDIA_PATH" | tail -1 | tr -dc '0-9'; }
+
+log() { if command -v logger >/dev/null 2>&1; then logger -t nvr-prune -- "$*"; fi; echo "nvr-prune: $*"; }
+
+before="$(usage_pct)"
+deleted=0
+freed=0
+if [ "$before" -le "$MAX_USAGE_PCT" ]; then
+  log "usage ${before}% <= ${MAX_USAGE_PCT}%, nothing to do"
+  exit 0
+fi
+
+# Oldest first, media files only. NUL-safe. Thumbnails (*.thumb) sit next to
+# their movie and are removed with it.
+while [ "$(usage_pct)" -gt "$MAX_USAGE_PCT" ]; do
+  mapfile -d '' -t victims < <(
+    find "$MEDIA_PATH" -type f \( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.avi' -o -iname '*.mov' -o -iname '*.jpg' -o -iname '*.jpeg' \) \
+      -printf '%T@ %p\0' | sort -z -n | head -z -n "$BATCH" | cut -z -d' ' -f2-
+  )
+  [ "${#victims[@]}" -gt 0 ] || { log "usage $(usage_pct)% still above ${MAX_USAGE_PCT}% but no media files left to delete"; break; }
+  for f in "${victims[@]}"; do
+    sz=$(stat -c %s "$f" 2>/dev/null || echo 0)
+    if [ "$DRY_RUN" -eq 1 ]; then
+      echo "would delete: $f"
+    else
+      rm -f -- "$f" "$f.thumb"
+    fi
+    deleted=$((deleted + 1)); freed=$((freed + sz))
+  done
+  [ "$DRY_RUN" -eq 1 ] && break
+done
+
+# Remove now-empty date directories (motionEye creates one per day per camera).
+[ "$DRY_RUN" -eq 1 ] || find "$MEDIA_PATH" -mindepth 2 -type d -empty -delete 2>/dev/null || true
+
+after="$(usage_pct)"
+log "usage ${before}% -> ${after}% (threshold ${MAX_USAGE_PCT}%), deleted ${deleted} file(s), $((freed / 1048576)) MiB$([ "$DRY_RUN" -eq 1 ] && echo ' [dry-run]')"

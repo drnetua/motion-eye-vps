@@ -1,0 +1,23 @@
+---
+# Copy to group_vars/all/vault.yml, fill in, then encrypt:
+#   ansible-vault encrypt group_vars/all/vault.yml
+# Never commit the plaintext file. See docs/INPUTS.md.
+
+# Connector token of the tunnel you created in the Zero Trust dashboard (docs/INPUTS.md §4):
+# the eyJ... string at the end of the "cloudflared service install" command shown there.
+vault_cloudflare_tunnel_token: "eyJ..."
+
+vault_bootstrap_admin_username: admin
+vault_bootstrap_admin_password: "change-me-after-first-login"
+vault_bootstrap_viewer_username: user
+vault_bootstrap_viewer_password: "change-me-after-first-login"
+
+# One entry per camera. name: unique, lowercase, letters digits and dashes.
+# main_url: full-resolution RTSP stream, used for recording.
+# sub_url (optional): low-resolution RTSP stream, used for motion detection.
+vault_cameras:
+  - name: front-door
+    main_url: "rtsp://user:password@203.0.113.21:554/Streaming/Channels/101"
+    sub_url: "rtsp://user:password@203.0.113.21:554/Streaming/Channels/102"
+  - name: backyard
+    main_url: "rtsp://user:password@203.0.113.22:554/stream1"

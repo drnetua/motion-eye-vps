@@ -1,0 +1,80 @@
+---
+# Probe every camera URL from the server with ffprobe in a throwaway container.
+- name: Build list of URLs to probe
+  ansible.builtin.set_fact:
+    _probe_targets: >-
+      {{ (cameras | map('combine', {'kind': 'main'}) | list)
+         + (cameras | selectattr('sub_url', 'defined') | map('combine', {'kind': 'sub'}) | list) }}
+
+- name: Pull ffprobe image
+  community.docker.docker_image_pull:
+    name: "{{ ffprobe_image }}"
+  register: _pull
+  retries: 3
+  delay: 5
+  until: _pull is succeeded
+
+- name: Does the deployment network exist yet
+  ansible.builtin.command: docker network inspect nvr
+  register: _nvrnet
+  changed_when: false
+  failed_when: false
+
+- name: Probe RTSP streams
+  ansible.builtin.command:
+    argv:
+      - timeout
+      - "{{ rtsp_probe_timeout_s }}"
+      - docker
+      - run
+      - --rm
+      - "--network={{ (_nvrnet.rc == 0) | ternary('nvr', 'host') }}"
+      - --entrypoint=ffprobe
+      - "{{ ffprobe_image }}"
+      - -v
+      - error
+      - -rtsp_transport
+      - tcp
+      - -rw_timeout
+      - "{{ (rtsp_probe_timeout_s | int - 5) * 1000000 }}"
+      - -select_streams
+      - v:0
+      - -show_entries
+      - stream=codec_name,width,height,avg_frame_rate
+      - -of
+      - csv=p=0
+      - "{{ item.kind == 'main' and item.main_url or item.sub_url }}"
+  loop: "{{ _probe_targets }}"
+  loop_control:
+    label: "{{ item.name }} ({{ item.kind }})"
+  register: _probes
+  changed_when: false
+  failed_when: false
+  no_log: true   # URLs embed camera credentials
+
+- name: Summarise probe results
+  ansible.builtin.set_fact:
+    rtsp_results: >-
+      {{ rtsp_results | default([]) + [ {
+           'name': item.item.name, 'kind': item.item.kind, 'ok': item.rc == 0 and (item.stdout | length > 0),
+           'line': item.item.name ~ '/' ~ item.item.kind ~ ': ' ~
+                   ((item.rc == 0 and item.stdout | length > 0)
+                    | ternary(item.stdout | trim | regex_replace(',', ' ') | regex_replace('^(\S+) (\d+) (\d+) (\S+)$', '\1 \2x\3 @ \4 fps'),
+                              'FAILED (rc=' ~ item.rc ~ ') ' ~ (item.stderr | default('') | regex_replace('rtsps?://[^@\s]+@', 'rtsp://***@') | trim | default('no stream within timeout', true))))
+         } ] }}
+  loop: "{{ _probes.results }}"
+  loop_control:
+    label: "{{ item.item.name }} ({{ item.item.kind }})"
+
+- name: Report camera probes
+  ansible.builtin.debug:
+    msg: "{{ rtsp_results | map(attribute='line') | list }}"
+
+- name: Stop if any camera is unreachable
+  ansible.builtin.assert:
+    that: rtsp_results | rejectattr('ok') | list | length == 0
+    fail_msg: >-
+      Unreachable camera stream(s) from the server:
+      {{ rtsp_results | rejectattr('ok') | map(attribute='line') | join('; ') }}.
+      Fix the URL or the camera's reachability from this server and re-run.
+    quiet: true

@@ -1,0 +1,207 @@
+---
+# Read-only checks. Every failure names what is wrong.
+
+# --- containers -------------------------------------------------------------
+- name: Compose services (wait while health checks are still starting)
+  ansible.builtin.command: docker compose -f {{ nvr_base_dir }}/docker-compose.yml ps --all --format json
+  register: _ps
+  changed_when: false
+  retries: 20
+  delay: 5
+  until: >-
+    (_ps.stdout | trim | length == 0) or
+    (_ps.stdout_lines | map('from_json') | selectattr('Health', 'defined') | selectattr('Health', 'equalto', 'starting') | list | length == 0)
+
+- name: Parse compose services
+  ansible.builtin.set_fact:
+    _services: "{{ (_ps.stdout | trim | length > 0) | ternary(_ps.stdout_lines | map('from_json') | list, []) }}"
+
+- name: Read compose profile state
+  ansible.builtin.slurp:
+    src: "{{ nvr_base_dir }}/.env"
+  register: _envfile
+  failed_when: false
+
+- name: Expected services (ingress only when the profile is enabled)
+  ansible.builtin.set_fact:
+    _expected_services: "{{ ['motioneye'] + ((_envfile.content | default('') | b64decode) is search('COMPOSE_PROFILES=ingress')) | ternary(['cloudflared'], []) }}"
+
+- name: Container logs for anything unhealthy
+  ansible.builtin.command: docker logs --tail 15 {{ item.Name }}
+  loop: "{{ _services | rejectattr('State', 'equalto', 'running') | list + (_services | selectattr('Health', 'defined') | rejectattr('Health', 'in', ['healthy', '']) | list) }}"
+  loop_control:
+    label: "{{ item.Name }}"
+  register: _bad_logs
+  changed_when: false
+  failed_when: false
+
+- name: Assert every expected container is running and healthy
+  ansible.builtin.assert:
+    that:
+      - _expected_services | difference(_services | map(attribute='Name') | list) | length == 0
+      - _services | selectattr('Name', 'in', _expected_services) | rejectattr('State', 'equalto', 'running') | list | length == 0
+      - _services | selectattr('Name', 'in', _expected_services) | selectattr('Health', 'defined') | rejectattr('Health', 'in', ['healthy', '']) | list | length == 0
+    fail_msg: >-
+      Unhealthy or missing container(s):
+      {{ ((_expected_services | difference(_services | map(attribute='Name') | list))
+         + (_services | selectattr('Name', 'in', _expected_services) | rejectattr('State', 'equalto', 'running') | map(attribute='Name') | list)
+         + (_services | selectattr('Name', 'in', _expected_services) | selectattr('Health', 'defined') | rejectattr('Health', 'in', ['healthy', '']) | map(attribute='Name') | list))
+         | unique | join(', ') }}.
+      {% for r in _bad_logs.results | default([]) %}--- {{ r.item.Name }} logs: {{ (r.stdout ~ r.stderr) | trim | regex_replace('\n', ' | ') | truncate(600) }} {% endfor %}
+    quiet: true
+
+# --- tunnel -----------------------------------------------------------------
+- name: Tunnel checks
+  ansible.builtin.import_tasks: tunnel.yml
+  when: "'cloudflared' in _expected_services"
+  tags: [cloudflare]
+
+# --- logins and cameras -----------------------------------------------------
+- name: Copy motionEye check script into the container
+  ansible.builtin.copy:
+    src: meye_check.py
+    dest: "{{ nvr_base_dir }}/etc/.meye_check.py"
+    mode: "0600"
+
+- name: Run motionEye checks inside the container
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - -e
+      - "ADMIN_USER={{ nvr_admin_username }}"
+      - -e
+      - "ADMIN_PASS={{ nvr_admin_password }}"
+      - -e
+      - "VIEWER_USER={{ nvr_viewer_username }}"
+      - -e
+      - "VIEWER_PASS={{ nvr_viewer_password }}"
+      - motioneye
+      - python3
+      - /etc/motioneye/.meye_check.py
+  register: _meye
+  changed_when: false
+  no_log: true
+
+- name: Parse motionEye checks
+  ansible.builtin.set_fact:
+    meye: "{{ _meye.stdout | from_json }}"
+
+- name: Assert admin login
+  ansible.builtin.assert:
+    that:
+      - meye.admin.login_status == 200
+      - meye.admin.config_list_status == 200
+      - meye.admin.main_get_status == 200
+    fail_msg: "Admin login failed as '{{ nvr_admin_username }}' (login HTTP {{ meye.admin.login_status }}). If you rotated the password, pass ADMIN_PASSWORD=... (docs/RUNBOOK.md)."
+    quiet: true
+
+- name: Assert viewer login and that the viewer cannot change settings
+  ansible.builtin.assert:
+    that:
+      - meye.viewer.login_status == 200
+      - meye.viewer.user_type == 'normal'
+      - meye.viewer.config_list_status == 200
+      - meye.viewer.main_get_status == 403
+      - meye.viewer.main_set_status == 403
+    fail_msg: "Viewer login/role check failed as '{{ nvr_viewer_username }}': {{ meye.viewer }}. If you rotated the password, pass VIEWER_PASSWORD=..."
+    quiet: true
+
+- name: Assert a wrong password is rejected
+  ansible.builtin.assert:
+    that: meye.wrong_password_status == 401
+    fail_msg: "motionEye accepted a wrong password (HTTP {{ meye.wrong_password_status }})"
+    quiet: true
+
+- name: Assert camera set equals inventory
+  ansible.builtin.assert:
+    that:
+      - (meye.cameras | map(attribute='name') | sort) == (cameras | map(attribute='name') | sort)
+    fail_msg: >-
+      Camera set differs from inventory. In NVR but not inventory: {{ meye.cameras | map(attribute='name') | difference(cameras | map(attribute='name')) | join(', ') or '-' }};
+      in inventory but not NVR: {{ cameras | map(attribute='name') | difference(meye.cameras | map(attribute='name')) | join(', ') or '-' }}
+    quiet: true
+
+- name: Assert every camera is connected and detecting
+  ansible.builtin.assert:
+    that:
+      - meye.cameras | rejectattr('enabled') | list | length == 0
+      - meye.cameras | rejectattr('connected') | list | length == 0
+      - meye.cameras | rejectattr('detection_active') | list | length == 0
+    fail_msg: >-
+      Camera problem(s):
+      {% for c in meye.cameras if not (c.enabled and c.connected and c.detection_active) %}{{ c.name }} (enabled={{ c.enabled }}, connected={{ c.connected }}, detection={{ c.detection_active }}, motion says: {{ c.connection_raw }}); {% endfor %}
+    quiet: true
+
+# --- configuration drift ----------------------------------------------------
+- name: Read camera configuration files
+  ansible.builtin.shell: grep -HE '^(emulate_motion|movie_output|movie_passthrough|picture_output|camera_name) ' {{ nvr_base_dir }}/etc/camera-*.conf || true
+  register: _camconf
+  changed_when: false
+
+- name: Parse recording mode per camera
+  ansible.builtin.set_fact:
+    _cam_modes: >-
+      {{ _cam_modes | default({}) | combine({ (item | regex_replace('^.*/(camera-\d+\.conf):.*$', '\1')):
+           { (item | regex_replace('^.*\.conf:(\S+) .*$', '\1')): (item | regex_replace('^.*\.conf:\S+ (.*)$', '\1')) } }, recursive=true) }}
+  loop: "{{ _camconf.stdout_lines }}"
+  loop_control:
+    label: "{{ item | regex_replace('^.*/(camera-\\d+\\.conf):.*$', '\\1') }}"
+
+- name: Assert motion-only recording on every camera
+  ansible.builtin.assert:
+    that:
+      - _cam_modes | length == cameras | length
+      - _cam_modes | dict2items | rejectattr('value.emulate_motion', 'equalto', 'off') | list | length == 0
+      - _cam_modes | dict2items | rejectattr('value.movie_output', 'equalto', 'on') | list | length == 0
+      - _cam_modes | dict2items | rejectattr('value.movie_passthrough', 'equalto', 'on') | list | length == 0
+      - _cam_modes | dict2items | rejectattr('value.picture_output', 'equalto', 'off') | list | length == 0
+    fail_msg: >-
+      Recording configuration drift:
+      {% for k, v in _cam_modes.items() if not (v.emulate_motion == 'off' and v.movie_output == 'on' and v.movie_passthrough == 'on' and v.picture_output == 'off') %}{{ k }} ({{ v.camera_name | default('?') }}): emulate_motion={{ v.emulate_motion }}, movie_output={{ v.movie_output }}, movie_passthrough={{ v.movie_passthrough }}, picture_output={{ v.picture_output }}; {% endfor %}
+      {{ (_cam_modes | length != cameras | length) | ternary(_cam_modes | length ~ ' camera files for ' ~ cameras | length ~ ' inventory cameras', '') }}
+    quiet: true
+
+# --- retention timer --------------------------------------------------------
+- name: Prune timer state
+  ansible.builtin.command: systemctl is-active nvr-prune.timer  # noqa: command-instead-of-module (read-only query)
+  register: _timer
+  changed_when: false
+  failed_when: false
+
+- name: Assert prune timer active
+  ansible.builtin.assert:
+    that: _timer.stdout == 'active'
+    fail_msg: "nvr-prune.timer is not active (state: {{ _timer.stdout }})"
+    quiet: true
+
+# --- host exposure ----------------------------------------------------------
+- name: Listening sockets
+  ansible.builtin.command: ss -Hltn
+  register: _ss
+  changed_when: false
+
+- name: Non-loopback listeners other than SSH
+  ansible.builtin.set_fact:
+    _exposed: >-
+      {{ _ss.stdout_lines | map('split') | map(attribute=3)
+         | reject('match', '^(127\.|\[::1\]|\[::ffff:127\.)')
+         | reject('match', '^(0\.0\.0\.0|\[::\]|[^:]+|\[[^\]]+\]):' ~ (ssh_port | default(22)) ~ '$')
+         | list }}
+
+- name: Assert nothing but SSH listens on a host interface
+  ansible.builtin.assert:
+    that: _exposed | length == 0
+    fail_msg: "Unexpected listener(s) on host interfaces: {{ _exposed | join(', ') }}. Containers must not publish ports."
+    quiet: true
+
+- name: Verification summary
+  ansible.builtin.debug:
+    msg:
+      - "containers: {{ _expected_services | join(', ') }} running and healthy"
+      - "logins: admin ok, viewer ok (read-only), wrong password rejected"
+      - "cameras: {{ meye.cameras | map(attribute='name') | join(', ') }} all connected, motion detection active"
+      - "recording: motion-triggered passthrough on all {{ cameras | length }} camera(s)"
+      - "retention: nvr-prune.timer active"
+      - "exposure: only SSH listens on host interfaces"
+      - "tunnel: {{ tunnel_summary | default('not configured (ingress profile off)') }}"

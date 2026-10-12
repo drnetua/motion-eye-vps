@@ -1,0 +1,7 @@
+---
+# Report server facts, assert prerequisites, probe cameras when Docker is present.
+- name: Examine server
+  hosts: nvr
+  gather_facts: true
+  roles:
+    - examine

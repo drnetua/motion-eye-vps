@@ -1,0 +1,7 @@
+---
+# Restore a snapshot taken by the update flow: make rollback SNAPSHOT=<id> (default: latest).
+- name: Roll back NVR deployment
+  hosts: nvr
+  gather_facts: true
+  roles:
+    - rollback

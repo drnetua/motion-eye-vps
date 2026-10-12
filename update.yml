@@ -1,0 +1,33 @@
+---
+# Update flow: validate, examine (must be deployed), OS upgrade, image update check,
+# snapshot, upgrade, verify, operator approval, rollback or commit.
+# `approval` must be explicit (D-22): `make update` sets it to `prompt` only when
+# stdin is a terminal; Ansible workers cannot detect a terminal themselves.
+- name: Require an explicit approval mode
+  hosts: nvr
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Assert approval is prompt, approve or reject
+      ansible.builtin.assert:
+        that: approval | default('') in ['prompt', 'approve', 'reject']
+        fail_msg: "stdin is not a terminal and no approval decision was given: run `make update APPROVAL=approve` or `make update APPROVAL=reject`, or pass `-e approval=approve|reject|prompt` to ansible-playbook. Nothing was changed."
+        quiet: true
+      delegate_to: localhost
+      run_once: true
+
+- name: Validate inputs
+  ansible.builtin.import_playbook: playbooks/check.yml
+  vars:
+    require_bootstrap_credentials: false
+
+- name: Examine
+  ansible.builtin.import_playbook: playbooks/examine.yml
+  vars:
+    require_existing_deployment: true
+
+- name: Harden (OS upgrade and baseline)
+  ansible.builtin.import_playbook: playbooks/harden.yml
+
+- name: Update NVR images
+  ansible.builtin.import_playbook: playbooks/update.yml

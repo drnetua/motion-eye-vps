@@ -1,0 +1,9 @@
+---
+skopeo_image: quay.io/skopeo/stable:latest
+# Approval gate: `approval` has no default and must be passed as prompt, approve or
+# reject (D-22). `make update` passes prompt from a terminal, or APPROVAL=... .
+snapshot_root: "{{ nvr_base_dir }}/snapshots"
+# Images without an org.opencontainers.image.version label: arguments that make the
+# image print `version X` (D-24). Run on the server with a 30 s timeout, no network.
+image_version_args:
+  cloudflared: "version"

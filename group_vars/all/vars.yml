@@ -1,0 +1,32 @@
+---
+# Defaults shared by every deployment; tracked in git, so nothing here is specific
+# to one server. Per-deployment values live in git-ignored files: the server address
+# and public hostname in inventory/hosts.yml, secrets in group_vars/all/vault.yml.
+# See docs/INPUTS.md for where every value comes from.
+
+# Cloudflare (docs/INPUTS.md §4). You create the tunnel, publish the hostname to
+# http://motioneye:8765 and protect it with an Access application in the Zero Trust
+# dashboard. The repo only needs the tunnel's connector token (vault_cloudflare_tunnel_token
+# in the vault) and the hostname you published (nvr_hostname in inventory/hosts.yml),
+# used by verification and in messages.
+
+# Cameras come from the vault because RTSP URLs embed camera credentials.
+# Format is documented in docs/INPUTS.md and group_vars/all/vault.yml.example.
+cameras: "{{ vault_cameras }}"
+
+# Bootstrap accounts, used only on the NVR's first start.
+bootstrap_admin_username: "{{ vault_bootstrap_admin_username | default('admin') }}"
+bootstrap_admin_password: "{{ vault_bootstrap_admin_password | default('') }}"
+bootstrap_viewer_username: "{{ vault_bootstrap_viewer_username | default('user') }}"
+bootstrap_viewer_password: "{{ vault_bootstrap_viewer_password | default('') }}"
+
+# Recording behaviour (see docs/RUNBOOK.md).
+retention_days: 14          # per-camera time-based retention
+retention_max_usage_pct: 90 # host-level storage cap, oldest recordings pruned first
+motion_pre_capture: 2       # seconds kept before motion starts
+motion_post_capture: 5      # seconds kept after motion ends
+detect_framerate: 5         # frames per second analysed for motion
+
+# Server paths.
+nvr_base_dir: /srv/motioneye
+nvr_timezone: UTC

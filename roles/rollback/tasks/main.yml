@@ -1,0 +1,69 @@
+---
+# Restore a snapshot: configuration, compose file, image pins. Media untouched.
+- name: Default to the latest snapshot
+  ansible.builtin.slurp:
+    src: "{{ snapshot_root | default(nvr_base_dir ~ '/snapshots') }}/LATEST"
+  register: _latest
+  when: snapshot_id is not defined
+
+- name: Snapshot to restore
+  ansible.builtin.set_fact:
+    rollback_id: "{{ snapshot_id | default(_latest.content | default('') | b64decode | trim) }}"
+    rollback_dir: "{{ snapshot_root | default(nvr_base_dir ~ '/snapshots') }}/{{ snapshot_id | default(_latest.content | default('') | b64decode | trim) }}"
+
+- name: Snapshot exists
+  ansible.builtin.stat:
+    path: "{{ rollback_dir }}/docker-compose.yml"
+  register: _snapdir
+
+- name: Assert snapshot exists
+  ansible.builtin.assert:
+    that: _snapdir.stat.exists
+    fail_msg: "Snapshot '{{ rollback_id }}' not found under {{ nvr_base_dir }}/snapshots"
+    quiet: true
+
+- name: Stop the deployment
+  ansible.builtin.command: docker compose -f {{ nvr_base_dir }}/docker-compose.yml down --remove-orphans
+  changed_when: true
+  failed_when: false
+
+- name: Restore configuration and compose file
+  ansible.builtin.shell: |
+    set -e
+    rm -rf "{{ nvr_base_dir }}/etc"
+    cp -a "{{ rollback_dir }}/etc" "{{ nvr_base_dir }}/etc"
+    cp -a "{{ rollback_dir }}/docker-compose.yml" "{{ nvr_base_dir }}/docker-compose.yml"
+    [ -f "{{ rollback_dir }}/.env" ] && cp -a "{{ rollback_dir }}/.env" "{{ nvr_base_dir }}/.env" || true
+  args:
+    executable: /bin/bash
+  changed_when: true
+
+- name: Start the previous images
+  community.docker.docker_compose_v2:
+    project_src: "{{ nvr_base_dir }}"
+    state: present
+    pull: missing
+    remove_orphans: true
+
+- name: Wait for motionEye container to be healthy
+  ansible.builtin.command: docker inspect --format '{{ "{{" }} .State.Health.Status {{ "}}" }}' motioneye
+  register: _health
+  changed_when: false
+  retries: 30
+  delay: 3
+  until: _health.stdout == 'healthy'
+
+- name: Load the snapshot's image pins
+  ansible.builtin.slurp:
+    src: "{{ rollback_dir }}/state/images.yml"
+  register: _pins
+
+- name: Verify the restored deployment
+  ansible.builtin.include_role:
+    name: verify
+  vars:
+    images: "{{ (_pins.content | b64decode | from_yaml).images }}"
+
+- name: Rolled back
+  ansible.builtin.debug:
+    msg: "Restored snapshot {{ rollback_id }}; previous images running and verified."

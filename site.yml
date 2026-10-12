@@ -1,0 +1,19 @@
+---
+# Initial deployment: validate inputs, examine, harden, probe cameras, deploy, verify.
+- name: Validate inputs
+  ansible.builtin.import_playbook: playbooks/check.yml
+
+- name: Examine
+  ansible.builtin.import_playbook: playbooks/examine.yml
+
+- name: Harden
+  ansible.builtin.import_playbook: playbooks/harden.yml
+
+- name: Pre-flight cameras
+  ansible.builtin.import_playbook: playbooks/preflight-rtsp.yml
+
+- name: Deploy
+  ansible.builtin.import_playbook: playbooks/deploy.yml
+
+- name: Verify
+  ansible.builtin.import_playbook: playbooks/verify.yml

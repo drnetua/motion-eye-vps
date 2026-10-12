@@ -1,0 +1,9 @@
+---
+# Tool images used only for checks; not part of the deployment.
+ffprobe_image: lscr.io/linuxserver/ffmpeg:latest
+rtsp_probe_timeout_s: 20
+# auto: probe cameras when Docker is present, otherwise report deferred.
+# force: require Docker and probe. skip: never probe.
+rtsp_preflight: auto
+# Warn when cameras exceed this many per CPU core.
+cameras_per_core_warn: 2

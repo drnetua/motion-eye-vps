@@ -1,0 +1,8 @@
+---
+motioneye_port: 8765            # inside the container network only
+motion_threshold_pct: 1.0       # % of pixels changed to count as motion
+detect_width: 640               # default analysis frame size when a camera entry gives none
+detect_height: 480
+movie_max_time_s: 600           # split long events into files of at most this length
+event_gap_s: 30                 # seconds without motion that end an event
+compose_project: nvr

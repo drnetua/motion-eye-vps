@@ -1,0 +1,17 @@
+# Vault password: never commit.
+.vault_pass
+# Per-deployment files: live in your clone only, never committed (docs/INPUTS.md,
+# README "Before your first deploy"). Each one you create by hand has a tracked
+# *.example template; the flows write the rest. Back them up off-machine.
+inventory/hosts.yml
+group_vars/all/vault.yml
+state/images.yml
+state/cloudflare.yml
+harvest/motion.conf
+.ansible/
+*.retry
+__pycache__/
+.idea/
+*.iml
+# Operator scratch notes with plaintext credentials: never commit.
+_user_info.txt

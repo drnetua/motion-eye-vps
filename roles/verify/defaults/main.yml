@@ -1,0 +1,8 @@
+---
+# Run-time credentials (never stored), read from the controller environment (D-23):
+# ADMIN_PASSWORD and VIEWER_PASSWORD; unset or empty falls back to bootstrap.
+# `make verify|update ADMIN_PASSWORD=...` exports them. -e nvr_admin_password=... still overrides.
+nvr_admin_username: "{{ bootstrap_admin_username }}"
+nvr_admin_password: "{{ lookup('ansible.builtin.env', 'ADMIN_PASSWORD') | default(bootstrap_admin_password, true) }}"
+nvr_viewer_username: "{{ bootstrap_viewer_username }}"
+nvr_viewer_password: "{{ lookup('ansible.builtin.env', 'VIEWER_PASSWORD') | default(bootstrap_viewer_password, true) }}"

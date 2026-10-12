@@ -1,0 +1,234 @@
+---
+- name: Assert approval is prompt, approve or reject
+  ansible.builtin.assert:
+    that: approval | default('') in ['prompt', 'approve', 'reject']
+    fail_msg: "stdin is not a terminal and no approval decision was given: run `make update APPROVAL=approve` or `make update APPROVAL=reject`, or pass `-e approval=approve|reject|prompt` to ansible-playbook. Nothing was changed."
+    quiet: true
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Resolve current registry digest for each tracked tag
+  ansible.builtin.command: >-
+    docker run --rm {{ skopeo_image }} inspect --raw
+    docker://{{ images[item].repository }}:{{ images[item].track }}
+  loop: "{{ images.keys() | list }}"
+  register: _raw
+  changed_when: false
+  retries: 3
+  delay: 5
+  until: _raw is succeeded
+  no_log: true   # manifests are large, not secret
+
+- name: Compute index digests
+  ansible.builtin.set_fact:
+    registry_digests: >-
+      {{ registry_digests | default({}) | combine({ item.item: 'sha256:' ~ (item.stdout | hash('sha256')) }) }}
+  loop: "{{ _raw.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Compare with recorded digests
+  ansible.builtin.set_fact:
+    image_updates: >-
+      {{ image_updates | default({}) | combine({ item: {
+           'repository': images[item].repository, 'track': images[item].track,
+           'old': images[item].digest, 'new': registry_digests[item],
+           'changed': images[item].digest != registry_digests[item] } }) }}
+  loop: "{{ images.keys() | list }}"
+
+- name: Update check report
+  ansible.builtin.debug:
+    msg: >-
+      {% for k, v in image_updates.items() %}{{ k }} ({{ v.repository }}:{{ v.track }}):
+      {{ v.changed | ternary('UPDATE ' ~ v.old[:19] ~ ' -> ' ~ v.new[:19], 'up to date (' ~ v.old[:19] ~ ')') }}; {% endfor %}
+
+- name: Nothing to update
+  ansible.builtin.debug:
+    msg: "NVR images are up to date. OS upgrade done; nothing else to do."
+  when: image_updates | dict2items | selectattr('value.changed') | list | length == 0
+
+- name: End play when nothing to update
+  ansible.builtin.meta: end_host
+  when: image_updates | dict2items | selectattr('value.changed') | list | length == 0
+
+# --- snapshot -----------------------------------------------------------------
+- name: Snapshot id
+  ansible.builtin.set_fact:
+    snapshot_id: "{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}"
+
+- name: Snapshot directory
+  ansible.builtin.file:
+    path: "{{ snapshot_root }}/{{ snapshot_id }}"
+    state: directory
+    mode: "0700"
+
+- name: Snapshot configuration, compose and pins (media excluded)
+  ansible.builtin.shell: |
+    set -e
+    d="{{ snapshot_root }}/{{ snapshot_id }}"
+    cp -a "{{ nvr_base_dir }}/etc" "$d/etc"
+    cp -a "{{ nvr_base_dir }}/docker-compose.yml" "$d/docker-compose.yml"
+    [ -f "{{ nvr_base_dir }}/.env" ] && cp -a "{{ nvr_base_dir }}/.env" "$d/.env" || true
+    mkdir -p "$d/state"
+    cat > "$d/state/images.yml" <<'YAML'
+    {{ {'images': images} | to_nice_yaml(indent=2, sort_keys=False) }}
+    YAML
+    echo "{{ snapshot_id }}" > "{{ snapshot_root }}/LATEST"
+    du -sh "$d" | cut -f1
+  args:
+    executable: /bin/bash
+  register: _snap
+  changed_when: true
+
+- name: Snapshot taken
+  ansible.builtin.debug:
+    msg: "Snapshot {{ snapshot_id }} ({{ _snap.stdout }}) at {{ snapshot_root }}/{{ snapshot_id }}; rollback: make rollback SNAPSHOT={{ snapshot_id }}"
+
+# --- upgrade ------------------------------------------------------------------
+- name: New image pins
+  ansible.builtin.set_fact:
+    images_new: >-
+      {{ images_new | default({}) | combine({item.key: item.value | combine({'digest': image_updates[item.key].new})}) }}
+  loop: "{{ images | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Upgrade, verify, and roll back on failure
+  block:
+    - name: Deploy new pins
+      ansible.builtin.include_role:
+        name: motioneye
+      vars:
+        images: "{{ images_new }}"
+
+    - name: Resolve human-readable versions of the new images
+      ansible.builtin.command: >-
+        docker image inspect --format '{{ "{{" }} index .Config.Labels "org.opencontainers.image.version" {{ "}}" }}'
+        {{ images_new[item].repository }}:{{ images_new[item].track }}@{{ images_new[item].digest }}
+      loop: "{{ images_new.keys() | list }}"
+      register: _versions
+      changed_when: false
+      failed_when: false
+
+    - name: Ask images without a version label for their version
+      ansible.builtin.shell: |
+        timeout 30 docker run --rm --network none --name nvr-version-{{ item.item }} \
+          {{ images_new[item.item].repository }}:{{ images_new[item.item].track }}@{{ images_new[item.item].digest }} \
+          {{ image_version_args[item.item] }} 2>&1
+        rc=$?
+        docker rm -f nvr-version-{{ item.item }} >/dev/null 2>&1 || true
+        exit $rc
+      args:
+        executable: /bin/bash
+      loop: "{{ _versions.results | selectattr('stdout', 'equalto', '') | selectattr('item', 'in', image_version_args) | list }}"
+      loop_control:
+        label: "{{ item.item }}"
+      register: _version_cmds
+      changed_when: false
+      failed_when: false
+
+    - name: Human-readable versions
+      ansible.builtin.set_fact:
+        image_versions: >-
+          {{ image_versions | default({}) | combine({ item: (
+               (_versions.results | selectattr('item', 'equalto', item) | map(attribute='stdout') | first | default('') | trim)
+               or ((_version_cmds.results | default([]) | selectattr('item.item', 'equalto', item) | map(attribute='stdout') | first | default(''))
+                   | regex_findall('version (\S+)') | first | default(''))
+               or 'version unknown') }) }}
+      loop: "{{ images_new.keys() | list }}"
+
+    - name: Verify upgraded deployment
+      ansible.builtin.include_role:
+        name: verify
+      vars:
+        images: "{{ images_new }}"
+  rescue:
+    - name: Upgrade verification failed; rolling back
+      ansible.builtin.debug:
+        msg: "Upgrade failed verification: {{ ansible_failed_result.msg | default('see above') | truncate(400) }}. Rolling back to snapshot {{ snapshot_id }}."
+
+    - name: Roll back
+      ansible.builtin.include_role:
+        name: rollback
+
+    - name: Report rollback
+      ansible.builtin.fail:
+        msg: "Upgrade rolled back to snapshot {{ snapshot_id }}; the previous images are running again. Nothing was recorded."
+
+# --- approval gate ------------------------------------------------------------
+- name: Operator approval
+  ansible.builtin.pause:
+    prompt: |
+      Upgraded and verified:
+      {% for k in images_new.keys() %}  {{ k }}: {{ image_updates[k].old[:19] }} -> {{ image_updates[k].new[:19] }} {{ image_versions[k] | default('version unknown') }}
+      {% endfor %}
+      Open the NVR, check live view and recordings. Type 'approve' to keep and record, anything else to roll back
+  register: _prompt
+  when: approval == 'prompt'
+
+- name: Decision
+  ansible.builtin.set_fact:
+    approved: "{{ (approval == 'approve') or (approval == 'prompt' and (_prompt.user_input | default('') | trim | lower) == 'approve') }}"
+
+- name: Rejected; rolling back
+  when: not approved
+  block:
+    - name: Roll back
+      ansible.builtin.include_role:
+        name: rollback
+    - name: Report rejection
+      ansible.builtin.debug:
+        msg: "Rolled back to snapshot {{ snapshot_id }} and re-verified. Nothing was recorded."
+
+- name: End play when rejected
+  ansible.builtin.meta: end_host
+  when: not approved
+
+# --- record (git-ignored local files, no git command; D-27) -------------------
+- name: Harvest motion.conf (password hashes and UI settings; no camera URLs)
+  ansible.builtin.fetch:
+    src: "{{ nvr_base_dir }}/etc/motion.conf"
+    dest: "{{ role_path }}/../../harvest/motion.conf"
+    flat: true
+
+- name: Strip motionEye's internal secrets from the harvested copy (regenerated on start)
+  ansible.builtin.lineinfile:
+    path: "{{ role_path }}/../../harvest/motion.conf"
+    regexp: '^# @(relay_secret|client_secret) '
+    state: absent
+  delegate_to: localhost
+  become: false
+
+- name: Assert the harvested file contains no RTSP credentials
+  ansible.builtin.assert:
+    that: not (lookup('ansible.builtin.file', role_path ~ '/../../harvest/motion.conf') is search('rtsps?://'))
+    fail_msg: "harvest/motion.conf contains an RTSP URL; refusing to write. Inspect the server's motion.conf."
+    quiet: true
+  delegate_to: localhost
+  become: false
+
+- name: Write new image pins
+  ansible.builtin.copy:
+    dest: "{{ role_path }}/../../state/images.yml"
+    mode: "0644"
+    content: |
+      ---
+      # Image pins. Written by the update flow on approval. `track` is the registry tag
+      # whose digest is followed; `digest` is what actually runs.
+      {% for k, v in images_new.items() %}
+      # {{ k }}: {{ image_versions[k] | default('version unknown') }} ({{ lookup('pipe', 'date -u +%Y-%m-%d') }})
+      {% endfor %}
+      {{ {'images': images_new} | to_nice_yaml(indent=2, sort_keys=False) }}
+  delegate_to: localhost
+  become: false
+
+- name: Done
+  ansible.builtin.debug:
+    msg: |-
+      Update approved. Recorded in your clone (git-ignored, not committed):
+        state/images.yml      new image pins
+        harvest/motion.conf   NVR settings and password hashes
+      {% for k, v in image_updates.items() if v.changed %}  {{ k }}: {{ v.old }} -> {{ v.new }}
+      {% endfor %}  Snapshot {{ snapshot_id }} stays on the server.
+      Back up state/ and harvest/ off this machine now (README, "Before your first deploy").

@@ -1,0 +1,49 @@
+# Managed by the ops repo (roles/motioneye). Do not edit on the server.
+name: {{ compose_project }}
+
+services:
+  motioneye:
+    image: {{ images.motioneye.repository }}:{{ images.motioneye.track }}@{{ images.motioneye.digest }}
+    container_name: motioneye
+    hostname: motioneye
+    restart: unless-stopped
+    environment:
+      TZ: {{ nvr_timezone }}
+    volumes:
+      - {{ nvr_base_dir }}/etc:/etc/motioneye
+      - {{ nvr_base_dir }}/media:/var/lib/motioneye
+    networks: [nvr]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:{{ motioneye_port }}/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  cloudflared:
+    image: {{ images.cloudflared.repository }}:{{ images.cloudflared.track }}@{{ images.cloudflared.digest }}
+    container_name: cloudflared
+    restart: unless-stopped
+    profiles: [ingress]
+    command: tunnel --no-autoupdate --metrics 127.0.0.1:2000 run
+    env_file:
+      - path: {{ nvr_base_dir }}/cloudflared.env
+        required: false
+    depends_on: [motioneye]
+    networks: [nvr]
+    healthcheck:
+      test: ["CMD", "cloudflared", "tunnel", "--metrics", "127.0.0.1:2000", "ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+networks:
+  nvr:
+    name: nvr

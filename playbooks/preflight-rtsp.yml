@@ -1,0 +1,10 @@
+---
+# Probe every camera from the server. Requires Docker (installed by harden.yml).
+- name: Pre-flight camera streams
+  hosts: nvr
+  gather_facts: false
+  tasks:
+    - name: Probe RTSP streams
+      ansible.builtin.include_role:
+        name: examine
+        tasks_from: rtsp

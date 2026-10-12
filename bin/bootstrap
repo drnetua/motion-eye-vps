@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# One-time local setup for a fresh clone: installs Ansible (via uv) and the
+# collections this repo uses. Needs only git, ssh and uv to be present.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "uv is required. Install it with:" >&2
+  echo "  curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
+  exit 1
+fi
+
+echo "==> Installing ansible-core (with the ansible collection bundle) via uv"
+uv tool install --quiet ansible-core --with ansible
+uv tool install --quiet ansible-lint || echo "   (ansible-lint optional, skipped)"
+
+echo "==> Installing collections from requirements.yml"
+ansible-galaxy collection install -r requirements.yml -p .ansible/collections >/dev/null
+
+echo "==> Checking"
+ansible --version | head -1
+ansible-galaxy collection list -p .ansible/collections 2>/dev/null | grep -E "community\.(docker|general)|ansible\.posix"
+
+if [ ! -f .vault_pass ]; then
+  cat <<'MSG'
+
+Next:
+  1. Put your vault password in .vault_pass (git-ignored):   umask 077; echo 'your-vault-password' > .vault_pass
+  2. Create the vault from the example and encrypt it:
+       cp group_vars/all/vault.yml.example group_vars/all/vault.yml
+       $EDITOR group_vars/all/vault.yml
+       ansible-vault encrypt group_vars/all/vault.yml
+  3. Create the inventory from its example and set the server address and hostname:
+       cp inventory/hosts.yml.example inventory/hosts.yml
+       $EDITOR inventory/hosts.yml
+  4. Run: make check, then make init
+  These files are git-ignored: back them up together with .vault_pass (README).
+MSG
+fi

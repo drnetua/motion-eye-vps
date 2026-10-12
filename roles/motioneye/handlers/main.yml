@@ -1,0 +1,7 @@
+---
+- name: Restart motioneye
+  ansible.builtin.command: docker restart motioneye
+  changed_when: true
+  # Only meaningful once the container exists; ignore on the very first deploy
+  # where the compose task below starts it fresh anyway.
+  failed_when: false

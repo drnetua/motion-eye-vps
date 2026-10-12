@@ -1,0 +1,10 @@
+---
+# Read-only verification of a deployed system.
+- name: Verify deployment
+  hosts: nvr
+  gather_facts: false
+  vars_files:
+    # Local pins once an update was approved, else the tracked defaults (D-29).
+    - ["../state/images.yml", "../state/images.yml.example"]
+  roles:
+    - verify

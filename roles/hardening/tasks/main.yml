@@ -1,0 +1,133 @@
+---
+- name: Upgrade all packages
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 600
+    upgrade: dist
+    autoremove: true
+    autoclean: true
+  register: _upgrade
+  retries: 3
+  delay: 15
+  until: _upgrade is succeeded
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+
+- name: Check whether a reboot is required
+  ansible.builtin.stat:
+    path: /var/run/reboot-required
+  register: _reboot_required
+
+- name: Reboot to apply upgrades
+  ansible.builtin.reboot:
+    msg: "Rebooting to apply package upgrades"
+    reboot_timeout: 600
+    post_reboot_delay: 10
+  when: _reboot_required.stat.exists and not (skip_reboot | default(false) | bool)
+
+- name: Install baseline packages
+  ansible.builtin.apt:
+    name:
+      - unattended-upgrades
+      - ufw
+      - fail2ban
+      - ca-certificates
+      - curl
+      - gnupg
+      - python3-apt
+    state: present
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+
+# --- automatic security updates -------------------------------------------
+- name: Enable unattended security upgrades
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    mode: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Download-Upgradeable-Packages "1";
+      APT::Periodic::AutocleanInterval "7";
+      APT::Periodic::Unattended-Upgrade "1";
+
+- name: Enable unattended-upgrades service
+  ansible.builtin.systemd_service:
+    name: unattended-upgrades
+    enabled: true
+    state: started
+
+# --- SSH: keys only ---------------------------------------------------------
+- name: Harden sshd
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/10-nvr-hardening.conf
+    mode: "0644"
+    content: |
+      # Managed by the ops repo (roles/hardening). Keys only.
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      ChallengeResponseAuthentication no
+      PubkeyAuthentication yes
+      PermitRootLogin prohibit-password
+      PermitEmptyPasswords no
+      X11Forwarding no
+      MaxAuthTries 4
+  notify: Validate and reload sshd
+
+- name: Remove cloud-init password override if present
+  ansible.builtin.file:
+    path: /etc/ssh/sshd_config.d/50-cloud-init.conf
+    state: absent
+  notify: Validate and reload sshd
+
+- name: Flush handlers so sshd is validated before the firewall changes
+  ansible.builtin.meta: flush_handlers
+
+# --- firewall: inbound 22 only ---------------------------------------------
+- name: Firewall default deny inbound
+  community.general.ufw:
+    direction: incoming
+    policy: deny
+
+- name: Firewall default allow outbound
+  community.general.ufw:
+    direction: outgoing
+    policy: allow
+
+- name: Firewall allow SSH (brute force is handled by fail2ban, not ufw limit, so
+        back-to-back Ansible runs are never rate-limited out)
+  community.general.ufw:
+    rule: allow
+    port: "{{ ssh_port }}"
+    proto: tcp
+    comment: ssh
+
+- name: Firewall enabled
+  community.general.ufw:
+    state: enabled
+    logging: "low"
+
+# --- fail2ban ---------------------------------------------------------------
+- name: Configure fail2ban sshd jail
+  ansible.builtin.copy:
+    dest: /etc/fail2ban/jail.d/sshd.local
+    mode: "0644"
+    content: |
+      # Managed by the ops repo (roles/hardening).
+      [DEFAULT]
+      backend = systemd
+      banaction = ufw
+      bantime = {{ fail2ban_bantime }}
+      findtime = {{ fail2ban_findtime }}
+      maxretry = {{ fail2ban_maxretry }}
+
+      [sshd]
+      enabled = true
+      port = {{ ssh_port }}
+      mode = aggressive
+  notify: Restart fail2ban
+
+- name: Enable fail2ban
+  ansible.builtin.systemd_service:
+    name: fail2ban
+    enabled: true
+    state: started

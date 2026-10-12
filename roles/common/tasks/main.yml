@@ -1,0 +1,82 @@
+---
+# Input validation. Runs on localhost before any remote task.
+# Every failure names the offending input.
+
+- name: Collect camera names
+  ansible.builtin.set_fact:
+    _camera_names: "{{ cameras | default([]) | map(attribute='name') | list }}"
+
+- name: Validate camera list is present
+  ansible.builtin.assert:
+    that:
+      - cameras is defined
+      - cameras is iterable
+      - cameras | length > 0
+    fail_msg: "cameras: define at least one camera in vault_cameras (see docs/INPUTS.md)"
+    quiet: true
+
+- name: Validate camera names are unique
+  vars:
+    _dupes: "{{ _camera_names | community.general.counter | dict2items | selectattr('value', '>', 1) | map(attribute='key') | list }}"
+  ansible.builtin.assert:
+    that: _dupes | length == 0
+    fail_msg: "cameras: duplicate camera name(s): {{ _dupes | join(', ') }}"
+    quiet: true
+
+- name: Validate each camera entry
+  ansible.builtin.assert:
+    that:
+      - item.name is defined
+      - item.name is match('^[a-z0-9][a-z0-9-]{0,62}$')
+      - item.main_url is defined
+      - item.main_url is match('^rtsps?://')
+      - (item.sub_url is not defined) or (item.sub_url is match('^rtsps?://'))
+    fail_msg: >-
+      camera '{{ item.name | default('<unnamed>') }}': name must match ^[a-z0-9][a-z0-9-]{0,62}$,
+      main_url is required and sub_url (if given) must start with rtsp:// or rtsps://
+    quiet: true
+  loop: "{{ cameras }}"
+  loop_control:
+    label: "{{ item.name | default('<unnamed>') }}"
+
+- name: Refuse the removed Cloudflare mode selector
+  ansible.builtin.assert:
+    that: cloudflare_mode is not defined
+    fail_msg: >-
+      cloudflare_mode is no longer used: the API mode was removed (change cloudflare-token-only, D-19).
+      Delete cloudflare_mode, cloudflare_account_id, cloudflare_zone_id, cloudflare_zone_name and
+      cloudflare_allowed_emails from group_vars/all/vars.yml and vault_cloudflare_api_token from the vault.
+      The tunnel, hostname and Access application are configured by you in the Zero Trust dashboard (docs/INPUTS.md §4).
+    quiet: true
+
+- name: Validate connector token
+  ansible.builtin.assert:
+    that:
+      - vault_cloudflare_tunnel_token is defined
+      - vault_cloudflare_tunnel_token is match('^eyJ[A-Za-z0-9_=-]{40,}$')
+    fail_msg: "vault_cloudflare_tunnel_token is missing from the vault or is not a connector token (the eyJ... string from the Zero Trust dashboard; docs/INPUTS.md §4)"
+    quiet: true
+
+- name: Validate public hostname
+  ansible.builtin.assert:
+    that:
+      - nvr_hostname is defined
+      - nvr_hostname is match('^([a-z0-9-]+\.)+[a-z]{2,}$')
+    fail_msg: "nvr_hostname '{{ nvr_hostname | default('') }}' must be the fully qualified hostname you published on the tunnel (docs/INPUTS.md §4)"
+    quiet: true
+
+- name: Validate bootstrap credentials (initial deployment only)
+  ansible.builtin.assert:
+    that:
+      - bootstrap_admin_username | length > 0
+      - bootstrap_admin_password | length >= 8
+      - bootstrap_viewer_username | length > 0
+      - bootstrap_viewer_password | length >= 8
+      - bootstrap_admin_username != bootstrap_viewer_username
+    fail_msg: "bootstrap admin and viewer credentials are required for the initial deployment (passwords at least 8 characters, distinct usernames); see docs/INPUTS.md §3"
+    quiet: true
+  when: require_bootstrap_credentials | default(false) | bool
+
+- name: Inputs look valid
+  ansible.builtin.debug:
+    msg: "{{ cameras | length }} camera(s): {{ _camera_names | join(', ') }}; hostname {{ nvr_hostname }}; connector token present"

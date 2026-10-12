@@ -1,0 +1,16 @@
+# @enabled on
+# @admin_username {{ bootstrap_admin_username }}
+# @admin_password 
+# @normal_username {{ bootstrap_viewer_username }}
+# @normal_password 
+# @lang en
+
+
+setup_mode off
+webcontrol_port 7999
+webcontrol_interface 1
+webcontrol_localhost on
+webcontrol_parms 2
+{% for c in cameras %}
+camera camera-{{ loop.index }}.conf
+{% endfor %}

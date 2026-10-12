@@ -1,0 +1,11 @@
+---
+# Validate operator inputs without touching the server.
+- name: Validate operator inputs
+  hosts: nvr
+  gather_facts: false
+  connection: local
+  tasks:
+    - name: Run input validation
+      ansible.builtin.import_role:
+        name: common
+      delegate_to: localhost

@@ -1,0 +1,46 @@
+---
+# Cloudflare Tunnel connector, run from the connector token the operator obtained in the
+# Zero Trust dashboard (docs/INPUTS.md §4, D-19). The tunnel, its public hostname and the
+# Access application are created by the operator in the dashboard; this role makes no
+# Cloudflare API call. It writes the token to the server, records the tunnel id decoded
+# from the token in the local clone (state/cloudflare.yml, git-ignored), and enables
+# the ingress compose profile. Verification (roles/verify) checks that the hostname
+# is served and sits behind Cloudflare Access.
+
+- name: Deployment directory
+  ansible.builtin.file:
+    path: "{{ nvr_base_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Record tunnel id from the connector token
+  ansible.builtin.set_fact:
+    cf_tunnel_id: "{{ ((vault_cloudflare_tunnel_token ~ '===')[:(((vault_cloudflare_tunnel_token | length) + 3) // 4) * 4] | b64decode | from_json).t }}"
+
+- name: Record the tunnel id in the local clone
+  ansible.builtin.copy:
+    dest: "{{ role_path }}/../../state/cloudflare.yml"
+    mode: "0644"
+    content: |
+      ---
+      # Written by the deploy flow: the id of the tunnel the connector token belongs to.
+      # A local record only (git-ignored); compare it after pasting a new token.
+      cloudflare_tunnel_id: "{{ cf_tunnel_id }}"
+  delegate_to: localhost
+  become: false
+
+- name: Write tunnel token for the connector (server only, never the repo)
+  ansible.builtin.copy:
+    dest: "{{ nvr_base_dir }}/cloudflared.env"
+    mode: "0600"
+    content: "TUNNEL_TOKEN={{ vault_cloudflare_tunnel_token }}\n"
+  no_log: true
+  notify: Restart cloudflared
+
+- name: Enable the ingress compose profile
+  ansible.builtin.copy:
+    dest: "{{ nvr_base_dir }}/.env"
+    mode: "0644"
+    content: |
+      # Managed by the ops repo (roles/cloudflare).
+      COMPOSE_PROFILES=ingress

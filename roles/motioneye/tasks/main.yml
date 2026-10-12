@@ -1,0 +1,160 @@
+---
+- name: Deployment directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ nvr_base_dir }}"
+    - "{{ nvr_base_dir }}/etc"
+    - "{{ nvr_base_dir }}/media"
+    - "{{ nvr_base_dir }}/snapshots"
+
+- name: Render compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ nvr_base_dir }}/docker-compose.yml"
+    mode: "0644"
+  register: _compose_file
+
+- name: Pull pinned images
+  community.docker.docker_image_pull:
+    name: "{{ images[item].repository }}:{{ images[item].track }}@{{ images[item].digest }}"
+  loop: [motioneye, cloudflared]
+  register: _pull
+  retries: 3
+  delay: 10
+  until: _pull is succeeded
+
+- name: Locate motionEye package directory inside the image (for event hooks)
+  ansible.builtin.command: >-
+    docker run --rm --entrypoint python3
+    {{ images.motioneye.repository }}:{{ images.motioneye.track }}@{{ images.motioneye.digest }}
+    -c "import motioneye, os; print(os.path.dirname(motioneye.__file__))"
+  register: _pkg
+  changed_when: false
+
+- name: Set motionEye package directory
+  ansible.builtin.set_fact:
+    motioneye_pkg_dir: "{{ _pkg.stdout | trim }}"
+
+- name: Check seed marker
+  ansible.builtin.stat:
+    path: "{{ nvr_base_dir }}/etc/.seeded"
+  register: _seeded
+
+- name: Seed motion.conf (first deploy only)
+  ansible.builtin.template:
+    src: motion.conf.j2
+    dest: "{{ nvr_base_dir }}/etc/motion.conf"
+    mode: "0600"
+  when: not _seeded.stat.exists
+
+- name: Render camera configuration from inventory
+  ansible.builtin.template:
+    src: camera.conf.j2
+    dest: "{{ nvr_base_dir }}/etc/camera-{{ cam_id }}.conf"
+    mode: "0600"
+  loop: "{{ cameras }}"
+  loop_control:
+    index_var: _idx
+    loop_var: cam
+    label: "camera-{{ _idx + 1 }}.conf ({{ cam.name }})"
+  vars:
+    cam_id: "{{ _idx + 1 }}"
+  notify: Restart motioneye
+
+- name: Find stale camera files
+  ansible.builtin.find:
+    paths: "{{ nvr_base_dir }}/etc"
+    patterns: "camera-*.conf"
+    file_type: file
+  register: _camera_files
+
+- name: Remove camera files no longer in inventory
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ _camera_files.files }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  when: (item.path | basename | regex_replace('^camera-(\\d+)\\.conf$', '\\1') | int) > (cameras | length)
+  notify: Restart motioneye
+
+- name: Reconcile camera list in motion.conf
+  ansible.builtin.blockinfile:
+    path: "{{ nvr_base_dir }}/etc/motion.conf"
+    marker: "# {mark} ANSIBLE MANAGED CAMERA LIST"
+    block: |
+      {% for c in cameras %}
+      camera camera-{{ loop.index }}.conf
+      {% endfor %}
+  notify: Restart motioneye
+
+- name: Strip camera lines outside the managed block
+  ansible.builtin.shell: |
+    set -e
+    f="{{ nvr_base_dir }}/etc/motion.conf"
+    awk 'BEGIN{inblk=0} /^# BEGIN ANSIBLE MANAGED CAMERA LIST/{inblk=1} /^# END ANSIBLE MANAGED CAMERA LIST/{inblk=0; print; next} { if (!inblk && $0 ~ /^camera camera-[0-9]+\.conf$/) next; print }' "$f" > "$f.tmp"
+    if cmp -s "$f" "$f.tmp"; then rm -f "$f.tmp"; echo unchanged; else mv "$f.tmp" "$f"; chmod 600 "$f"; echo changed; fi
+  args:
+    executable: /bin/bash
+  register: _strip
+  changed_when: _strip.stdout == 'changed'
+  notify: Restart motioneye
+
+- name: Start the deployment
+  community.docker.docker_compose_v2:
+    project_src: "{{ nvr_base_dir }}"
+    state: present
+    pull: never
+    remove_orphans: true
+  register: _up
+
+- name: Flush handlers (restart if configuration changed)
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for motionEye container to be healthy
+  ansible.builtin.command: docker inspect --format '{{ "{{" }} .State.Health.Status {{ "}}" }}' motioneye
+  register: _health
+  changed_when: false
+  retries: 30
+  delay: 3
+  until: _health.stdout == 'healthy'
+
+- name: Seed accounts (first deploy only)
+  when: not _seeded.stat.exists
+  block:
+    - name: Set admin and viewer passwords inside the container
+      ansible.builtin.command:
+        cmd: docker exec -i motioneye python3 -
+        stdin: |
+          from motioneye import config
+          m = config.get_main()
+          m['@admin_username'] = {{ bootstrap_admin_username | to_json }}
+          m['@normal_username'] = {{ bootstrap_viewer_username | to_json }}
+          config.set_main(m)
+          config.set_admin_password({{ bootstrap_admin_password | to_json }})
+          config.set_normal_password({{ bootstrap_viewer_password | to_json }})
+          print('seeded')
+      register: _seed
+      changed_when: "'seeded' in _seed.stdout"
+      no_log: true
+
+    - name: Restart motionEye to load seeded accounts
+      ansible.builtin.command: docker restart motioneye
+      changed_when: true
+
+    - name: Write seed marker
+      ansible.builtin.copy:
+        dest: "{{ nvr_base_dir }}/etc/.seeded"
+        content: "seeded {{ ansible_date_time.iso8601 }}\n"
+        mode: "0600"
+
+    - name: Wait for motionEye container to be healthy after seeding
+      ansible.builtin.command: docker inspect --format '{{ "{{" }} .State.Health.Status {{ "}}" }}' motioneye
+      register: _health2
+      changed_when: false
+      retries: 30
+      delay: 3
+      until: _health2.stdout == 'healthy'

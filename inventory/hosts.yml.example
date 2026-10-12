@@ -1,0 +1,12 @@
+---
+# The single NVR server. Copy to inventory/hosts.yml (git-ignored) and fill in:
+#   cp inventory/hosts.yml.example inventory/hosts.yml
+# Root access is by SSH key only (docs/INPUTS.md §1).
+all:
+  hosts:
+    nvr:
+      # The server's public address (docs/INPUTS.md §1).
+      ansible_host: 203.0.113.10
+      ansible_user: root
+      # The hostname you published on the Cloudflare tunnel (docs/INPUTS.md §4.3).
+      nvr_hostname: nvr.example.com

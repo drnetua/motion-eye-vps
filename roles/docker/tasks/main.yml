@@ -1,0 +1,71 @@
+---
+- name: Docker apt keyring directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+- name: Docker apt signing key
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    mode: "0644"
+  register: _key
+  retries: 3
+  delay: 5
+  until: _key is succeeded
+
+- name: Docker apt repository
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [arch={{ _deb_arch[ansible_architecture] | default(ansible_architecture) }} signed-by=/etc/apt/keyrings/docker.asc]
+      https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable
+    filename: docker
+    state: present
+  vars:
+    _deb_arch:
+      x86_64: amd64
+      aarch64: arm64
+
+- name: Install Docker Engine and Compose plugin
+  ansible.builtin.apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+      - python3-requests   # needed by community.docker modules
+      - python3-yaml
+    state: present
+    update_cache: true
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+
+- name: Docker daemon configuration (log rotation, no userland proxy)
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    mode: "0644"
+    content: "{{ _daemon | to_nice_json }}\n"
+  vars:
+    _daemon:
+      log-driver: json-file
+      log-opts:
+        max-size: 10m
+        max-file: "3"
+      live-restore: true
+  notify: Restart docker
+
+- name: Docker enabled and running
+  ansible.builtin.systemd_service:
+    name: docker
+    enabled: true
+    state: started
+
+- name: Flush handlers
+  ansible.builtin.meta: flush_handlers
+
+- name: Confirm compose plugin
+  ansible.builtin.command: docker compose version --short
+  register: _compose
+  changed_when: false

@@ -1,0 +1,16 @@
+---
+# Cloudflare ingress, motionEye with cameras from inventory, retention timer.
+- name: Deploy NVR
+  hosts: nvr
+  gather_facts: true
+  force_handlers: true
+  vars_files:
+    # Local pins once an update was approved, else the tracked defaults (D-29).
+    - ["../state/images.yml", "../state/images.yml.example"]
+  roles:
+    - role: cloudflare
+      tags: [cloudflare]
+    - role: motioneye
+      tags: [motioneye]
+    - role: retention
+      tags: [retention]
